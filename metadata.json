@@ -1,0 +1,5 @@
+{
+  "name": "长篇小说深度分析师",
+  "description": "基于 Gemini 3 Pro 模型，专为超长文本设计的深度小说分析工具。支持提取详细大纲、分析写作风格及拆解世界观设定。",
+  "requestFramePermissions": []
+}
