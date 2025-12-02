@@ -2,22 +2,34 @@
 import { GoogleGenAI } from "@google/genai";
 import { AnalysisType, PromptConfig } from "../types";
 
-// Initialize the client
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-
 const MODEL_NAME = "gemini-3-pro-preview";
 
-// Token Safety Limits
-const SAFE_CHUNK_SIZE = 400000; 
-const CHUNK_OVERLAP = 2000;
+// Token/Char Limits
+// Aim for ~300k chars per chunk to be safe within 1M token limit even with CJK density.
+const TARGET_CHUNK_SIZE = 300000; 
+const MIN_CHUNK_SIZE = 10000; 
 
 // --- Default Prompts Exported for UI ---
 
 export const DEFAULT_PROMPTS: Record<AnalysisType, PromptConfig> = {
+  summary: {
+    system: `你是一位拥有过目不忘能力的速读情报官。你的任务是负责“把书读薄”。
+请清洗掉原文中的环境描写、无关对话、水字数的重复内容，只保留核心剧情骨干、关键人物出场和重要设定。
+目标：将文本压缩至原来的 10%-20%，但保留 95% 的关键信息量。供后续分析师使用。`,
+    user: `请对这段文本进行高保真压缩（情报清洗）。
+
+**要求**：
+1. **按时间顺序**记述发生了什么，不要写成读后感。
+2. **保留关键名次**：人名、地名、功法名不要省略。
+3. **去除修饰**：删掉形容词、心理描写，只留动作和事件。
+4. **格式**：使用紧凑的段落，不要分太细的点。
+
+（请开始压缩...）`
+  },
   outline: {
     system: `你是一位专业的网文主编和剧情架构师。你的任务是分析小说文本，提取极具深度的结构化大纲。
 请忽略排版干扰。重点关注：故事推进、冲突升级、高潮节点。`,
-    user: `请分析这段小说文本。
+    user: `请分析这段小说文本（或剧情摘要）。
 
 **输出要求（Markdown）**：
 1. **本段剧情概括**：用一句话总结这部分讲了什么。
@@ -46,54 +58,175 @@ export const DEFAULT_PROMPTS: Record<AnalysisType, PromptConfig> = {
     user: `请提取这段文本中出现的所有新设定。
 
 **请结构化整理以下内容（若有）**：
-- **地理与势力**：国家、宗门、城市、特殊地形。
-- **力量体系**：境界划分、特殊能力、武器道具。
-- **人物关系**：新登场的重要人物及其身份。
-- **专有名词**：独特的术语解释。
+1. **地理与势力**：国家、宗门、城市、特殊地形。
+2. **力量体系**：境界划分、特殊能力、武器道具。
+3. **专有名词**：独特的术语解释。
 
 如果这段文本没有新设定，请简短说明。`
+  },
+  relationships: {
+    system: `你是一位资深的人物心理分析师。你的任务是梳理小说中错综复杂的人物关系网。
+关注：角色间的互动、情感变化、阵营归属、隐藏的羁绊。`,
+    user: `请分析这段文本中出现的人物及其互动关系。
+
+**输出要求**：
+1. **登场人物清单**：列出本段出场的主要角色。
+2. **关系动态**：
+   - [角色A] vs [角色B]：描述他们当前的互动模式（如：敌对、利用、暧昧、师徒）。
+   - 是否有关系性质的重大转折？
+3. **潜在伏笔**：人物行为中是否有不合常理、暗示后续发展的细节？`
+  },
+  theme: {
+    system: `你是一位文学系教授。你的任务是透过表面的情节，提炼小说深层的母题（Motif）与核心思想（Theme）。
+关注：反复出现的意象、主角的道德困境、作者想要探讨的社会/人性议题。`,
+    user: `请深入解读这段文本的深层含义。
+
+**分析维度**：
+1. **核心母题**：本段情节在探讨什么？（例如：复仇的代价、成长的阵痛、权力的异化）。
+2. **关键意象**：是否有反复出现的象征性事物？
+3. **价值观冲突**：主角在做什么艰难的选择？这反映了什么价值观？`
+  },
+  plotholes: {
+    system: `你是一位以“找茬”为乐的逻辑审查员。你的任务是寻找剧情中的不合理之处、逻辑漏洞（Bug）和吃书设定。
+关注：时间线错误、战力崩坏、人物降智、前后设定矛盾。`,
+    user: `请严格审查这段文本的逻辑性。
+
+**审查报告**：
+1. **逻辑漏洞（如果有）**：是否有解释不通的情节？
+2. **设定冲突（如果有）**：是否与之前的已知设定（如力量体系、人物性格）矛盾？
+3. **降智行为**：角色是否为了推动剧情而强行做出不符合人设的蠢事？
+4. **合理性建议**：如果是你，你会如何修改以堵上这个漏洞？
+
+如果本段逻辑严密，请注明“逻辑通顺，无明显漏洞”。`
   }
 };
 
 /**
- * Splits text into overlapping chunks
+ * Split text intelligently preserving paragraph/sentence boundaries
  */
-const createChunks = (text: string): string[] => {
-  if (text.length <= SAFE_CHUNK_SIZE) return [text];
-  
+const createSmartChunks = (text: string): string[] => {
   const chunks: string[] = [];
-  let startIndex = 0;
-  
-  while (startIndex < text.length) {
-    const endIndex = Math.min(startIndex + SAFE_CHUNK_SIZE, text.length);
-    chunks.push(text.slice(startIndex, endIndex));
+  let currentPos = 0;
+
+  while (currentPos < text.length) {
+    let endPos = currentPos + TARGET_CHUNK_SIZE;
     
-    if (endIndex === text.length) break;
-    startIndex += (SAFE_CHUNK_SIZE - CHUNK_OVERLAP);
+    // If remaining text is small enough, take it all
+    if (endPos >= text.length) {
+      chunks.push(text.slice(currentPos));
+      break;
+    }
+
+    // Backtrack to find a good breaking point
+    // Priority: \n\n (Paragraph) > \n (Line) > 。/./!/? (Sentence)
+    let splitPos = -1;
+    
+    // Search window: look back up to 20k chars from the hard cut limit
+    const searchStart = Math.max(currentPos + MIN_CHUNK_SIZE, endPos - 20000);
+    const searchEnd = endPos;
+    const textWindow = text.slice(searchStart, searchEnd);
+
+    // Helper to map window index to text index
+    const toAbsIndex = (windowIndex: number) => searchStart + windowIndex;
+
+    // 1. Try Paragraph break (\n\n)
+    const lastParagraph = textWindow.lastIndexOf('\n\n');
+    if (lastParagraph !== -1) {
+      splitPos = toAbsIndex(lastParagraph) + 2; // Split after the newlines
+    }
+
+    // 2. Try Line break (\n)
+    if (splitPos === -1) {
+        const lastLine = textWindow.lastIndexOf('\n');
+        if (lastLine !== -1) {
+            splitPos = toAbsIndex(lastLine) + 1;
+        }
+    }
+
+    // 3. Try Sentence break (Punctuation)
+    if (splitPos === -1) {
+        // Scan backwards for punctuation
+        for (let i = textWindow.length - 1; i >= 0; i--) {
+            if (/[。！？\.\!\?]/.test(textWindow[i])) {
+                splitPos = toAbsIndex(i) + 1;
+                break;
+            }
+        }
+    }
+
+    // 4. Fallback: Hard split at space if possible
+    if (splitPos === -1) {
+        const lastSpace = textWindow.lastIndexOf(' ');
+        if (lastSpace !== -1) {
+            splitPos = toAbsIndex(lastSpace) + 1;
+        }
+    }
+
+    // 5. Ultimate Fallback: Hard cut
+    if (splitPos === -1) {
+        splitPos = searchEnd;
+    }
+
+    chunks.push(text.slice(currentPos, splitPos));
+    currentPos = splitPos;
   }
   
   return chunks;
 };
 
 /**
- * Creates a sampled version of the text for global style analysis
+ * Creates a smart sampled version of the text for global style analysis
+ * Ensures we don't cut in the middle of sentences.
  */
 const sampleTextForStyle = (text: string): string => {
-  if (text.length <= SAFE_CHUNK_SIZE) return text;
+  if (text.length <= TARGET_CHUNK_SIZE) return text;
 
-  const sliceSize = 150000; 
-  const start = text.slice(0, sliceSize);
+  const SAMPLE_PART_SIZE = 100000; // 100k chars per part
   
-  const midIndex = Math.floor(text.length / 2) - Math.floor(sliceSize / 2);
-  const mid = text.slice(midIndex, midIndex + sliceSize);
-  
-  const end = text.slice(text.length - sliceSize);
-  
-  return `${start}\n\n...[此处省略中间内容]...\n\n${mid}\n\n...[此处省略中间内容]...\n\n${end}`;
+  // Helper to find a safe boundary forward
+  const findSafeEnd = (start: number, length: number) => {
+      let target = Math.min(start + length, text.length);
+      // Look forward for a bit to find a newline or punctuation
+      const lookAheadLimit = Math.min(target + 5000, text.length);
+      for (let i = target; i < lookAheadLimit; i++) {
+          if (/[\n。！？\.\!\?]/.test(text[i])) {
+              return i + 1;
+          }
+      }
+      return target; // Fallback
+  };
+
+  // Helper to find a safe boundary backward
+  const findSafeStart = (target: number) => {
+      const lookBackLimit = Math.max(0, target - 5000);
+      for (let i = target; i > lookBackLimit; i--) {
+          if (/[\n。！？\.\!\?]/.test(text[i])) {
+              return i + 1;
+          }
+      }
+      return target;
+  };
+
+  // 1. Head
+  const headEnd = findSafeEnd(0, SAMPLE_PART_SIZE);
+  const head = text.slice(0, headEnd);
+
+  // 3. Tail
+  const tailTarget = Math.max(0, text.length - SAMPLE_PART_SIZE);
+  const tailStart = findSafeStart(tailTarget);
+  const tail = text.slice(tailStart);
+
+  // 2. Mid
+  const midTarget = Math.floor(text.length / 2) - (SAMPLE_PART_SIZE / 2);
+  const midStart = findSafeStart(midTarget);
+  const midEnd = findSafeEnd(midStart, SAMPLE_PART_SIZE);
+  const mid = text.slice(midStart, midEnd);
+
+  return `${head}\n\n...[此处省略 ${((midStart - headEnd)/1000).toFixed(1)}k 字]...\n\n${mid}\n\n...[此处省略 ${((tailStart - midEnd)/1000).toFixed(1)}k 字]...\n\n${tail}`;
 };
 
 /**
- * Generates the specific user prompt for a chunk by appending context to the user's custom prompt
+ * Generates the specific user prompt for a chunk
  */
 const formatUserPrompt = (basePrompt: string, isPartial: boolean, chunkIndex?: number, total?: number): string => {
   const progressStr = isPartial && total ? `(当前正在分析第 ${chunkIndex! + 1}/${total} 部分)` : "";
@@ -109,6 +242,8 @@ const callGemini = async (
   userPrompt: string,
   onStream?: (text: string) => void
 ): Promise<string> => {
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  
   const responseStream = await ai.models.generateContentStream({
     model: MODEL_NAME,
     contents: [
@@ -123,7 +258,7 @@ const callGemini = async (
     config: {
       systemInstruction: systemInstruction,
       thinkingConfig: {
-        thinkingBudget: 1024, 
+        thinkingBudget: 32768, // Max thinking budget for deep analysis
       },
     }
   });
@@ -141,11 +276,17 @@ const callGemini = async (
 
 /**
  * Main analysis function
+ * @param text The raw text of the novel
+ * @param type The type of analysis
+ * @param promptConfig The prompt configuration
+ * @param processedContext Optional pre-processed summary to use instead of raw text (saves tokens)
+ * @param onStream Callback for streaming
  */
 export const analyzeNovelText = async (
   text: string, 
   type: AnalysisType,
   promptConfig: PromptConfig,
+  processedContext?: string,
   onStream?: (chunkText: string) => void
 ): Promise<string> => {
   try {
@@ -158,37 +299,74 @@ export const analyzeNovelText = async (
       }
     };
 
+    // STRATEGY 0: Use Processed Context (If available and applicable)
+    // Style analysis MUST use raw text to detect wording nuances.
+    // Summary agent (itself) MUST use raw text.
+    // Others can benefit from the condensed summary.
+    if (processedContext && type !== 'style' && type !== 'summary') {
+      handleStream(`*⚡ 已启用【全书速读情报】作为上下文，大幅节省 Token 并提高分析聚焦度...*\n\n---\n\n`);
+      
+      const prompt = formatUserPrompt(promptConfig.user, false);
+      // We assume the summary fits in one context window comfortably
+      await callGemini(processedContext, promptConfig.system, prompt, (chunk) => handleStream(chunk));
+      return accumulatedResult;
+    }
+
     // STRATEGY 1: Style Analysis (Sampling)
     if (type === 'style') {
       const sampledText = sampleTextForStyle(text);
       const prompt = formatUserPrompt(promptConfig.user, false);
       
-      if (text.length > SAFE_CHUNK_SIZE) {
-         handleStream(`*注：由于文件过大，已自动截取【开头】、【中间】、【结尾】三部分样本进行综合风格分析...*\n\n---\n\n`);
+      if (text.length > TARGET_CHUNK_SIZE) {
+         handleStream(`*注：由于文件过大，已自动智能截取【开头】、【中间】、【结尾】三部分样本进行综合风格分析（自动校准句子边界）...*\n\n---\n\n`);
       }
       
       await callGemini(sampledText, promptConfig.system, prompt, (chunk) => handleStream(chunk));
       return accumulatedResult;
     }
 
-    // STRATEGY 2: Sequential Chunking (Outline & Settings)
-    const chunks = createChunks(text);
+    // STRATEGY 2: Smart Chunking (Outline, Settings, Relationships, Theme, PlotHoles, Summary)
+    const chunks = createSmartChunks(text);
     
     if (chunks.length === 1) {
       const prompt = formatUserPrompt(promptConfig.user, false);
       await callGemini(chunks[0], promptConfig.system, prompt, (chunk) => handleStream(chunk));
     } else {
-      handleStream(`*检测到超长文本 (${chunks.length} 个部分)，正在分段深度分析中...*\n\n`);
+      handleStream(`*检测到超长文本，已智能分割为 ${chunks.length} 个语义完整的片段进行深度分析...*\n\n`);
       
       for (let i = 0; i < chunks.length; i++) {
-        const header = `\n\n### 📜 第 ${i + 1} 部分分析 (共 ${chunks.length} 部分)\n\n`;
+        const header = `\n\n### 📜 第 ${i + 1} 部分 (共 ${chunks.length} 部分)\n\n`;
         handleStream(header);
         
         const prompt = formatUserPrompt(promptConfig.user, true, i, chunks.length);
-        
         await callGemini(chunks[i], promptConfig.system, prompt, (chunk) => handleStream(chunk));
         
         handleStream(`\n\n---\n`);
+      }
+
+      // Final Summary Pass for Outline, Theme, AND Summary Agent itself
+      if ((type === 'outline' || type === 'theme' || type === 'summary') && accumulatedResult.length < 200000) {
+          let summaryPrompt = "";
+          let summaryHeader = "";
+          
+          if (type === 'outline') {
+            summaryHeader = `\n\n### 🏁 全书结构总结\n\n*正在基于以上分段大纲生成全书故事弧线总结...*\n\n`;
+            summaryPrompt = "基于以上分析的所有分段大纲，请总结全书的故事主线、核心矛盾演变以及最终结局（如果包含）。请用最精炼的语言梳理出一个‘起承转合’的整体结构。";
+          } else if (type === 'theme') {
+            summaryHeader = `\n\n### 🏁 核心主旨升华\n\n*正在综合分析全书的深层寓意...*\n\n`;
+            summaryPrompt = "基于以上各部分的主题分析，请提炼这本书最核心的这一个‘灵魂’。作者到底想通过这个故事表达什么？是关于人性的某种洞察，还是对某种社会现象的隐喻？";
+          } else if (type === 'summary') {
+            // For the Summary Agent, we don't necessarily need a meta-summary, 
+            // the concatenated parts are often good enough "Context".
+            // But we can add a quick "Story Arc" label at the end.
+            summaryHeader = "";
+            summaryPrompt = ""; 
+          }
+          
+          if (summaryPrompt) {
+             handleStream(summaryHeader);
+             await callGemini(accumulatedResult, "你是一位善于总结的文学主编。", summaryPrompt, (chunk) => handleStream(chunk));
+          }
       }
     }
 
@@ -197,7 +375,7 @@ export const analyzeNovelText = async (
   } catch (error) {
     console.error(`Error analyzing ${type}:`, error);
     if (error instanceof Error && error.message.includes("token")) {
-        throw new Error("文本过长，尽管已尝试分片，单片内容仍超过模型限制。建议检查文本是否包含大量非文本字符。");
+        throw new Error("文本过长或Token密度过高，建议检查文件格式。已尝试智能分片，但单片仍超出模型限制。");
     }
     throw error;
   }

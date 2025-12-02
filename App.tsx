@@ -1,8 +1,9 @@
 
 import React, { useState } from 'react';
-import { BookOpen, Feather, Map, FileText, Trash2, Cpu } from 'lucide-react';
+import { BookOpen, Feather, Map, FileText, Trash2, Cpu, Key, Users, Lightbulb, AlertOctagon } from 'lucide-react';
 import FileUpload from './components/FileUpload';
 import ResultSection from './components/ResultSection';
+import PreProcessSection from './components/PreProcessSection';
 import { AnalysisStatus, AnalysisResult, FileData, AnalysisType, PromptConfig, PromptTemplate } from './types';
 import { analyzeNovelText, DEFAULT_PROMPTS } from './services/geminiService';
 
@@ -11,6 +12,11 @@ const generateId = () => Math.random().toString(36).substr(2, 9);
 const App: React.FC = () => {
   const [fileData, setFileData] = useState<FileData | null>(null);
   
+  // State for the "Reader Agent" (Summary)
+  const [summaryState, setSummaryState] = useState<AnalysisResult>({
+    type: 'summary', content: '', status: AnalysisStatus.IDLE
+  });
+
   // States for Analysis Results
   const [outlineState, setOutlineState] = useState<AnalysisResult>({
     type: 'outline', content: '', status: AnalysisStatus.IDLE
@@ -22,6 +28,18 @@ const App: React.FC = () => {
   
   const [settingsState, setSettingsState] = useState<AnalysisResult>({
     type: 'settings', content: '', status: AnalysisStatus.IDLE
+  });
+
+  const [relationshipsState, setRelationshipsState] = useState<AnalysisResult>({
+    type: 'relationships', content: '', status: AnalysisStatus.IDLE
+  });
+
+  const [themeState, setThemeState] = useState<AnalysisResult>({
+    type: 'theme', content: '', status: AnalysisStatus.IDLE
+  });
+
+  const [plotholesState, setPlotholesState] = useState<AnalysisResult>({
+    type: 'plotholes', content: '', status: AnalysisStatus.IDLE
   });
 
   // States for Custom Prompts (Current Session)
@@ -82,9 +100,14 @@ const App: React.FC = () => {
 
   const handleFileLoaded = (data: FileData) => {
     setFileData(data);
+    // Reset all states
+    setSummaryState({ type: 'summary', content: '', status: AnalysisStatus.IDLE });
     setOutlineState({ type: 'outline', content: '', status: AnalysisStatus.IDLE });
     setStyleState({ type: 'style', content: '', status: AnalysisStatus.IDLE });
     setSettingsState({ type: 'settings', content: '', status: AnalysisStatus.IDLE });
+    setRelationshipsState({ type: 'relationships', content: '', status: AnalysisStatus.IDLE });
+    setThemeState({ type: 'theme', content: '', status: AnalysisStatus.IDLE });
+    setPlotholesState({ type: 'plotholes', content: '', status: AnalysisStatus.IDLE });
   };
 
   const handleRemoveFile = () => {
@@ -107,10 +130,21 @@ const App: React.FC = () => {
     setter(prev => ({ ...prev, status: AnalysisStatus.LOADING, content: '', error: undefined }));
 
     try {
+      // Determine if we can use the pre-processed summary
+      // We use summary ONLY if it exists AND the task is not style analysis AND the task is not the summary itself
+      const shouldUseSummary = 
+        summaryState.status === AnalysisStatus.SUCCESS && 
+        summaryState.content.length > 0 &&
+        type !== 'style' && 
+        type !== 'summary';
+      
+      const contextToUse = shouldUseSummary ? summaryState.content : undefined;
+
       await analyzeNovelText(
         fileData.content, 
         type, 
-        prompts[type], // Pass the current (potentially edited) prompt
+        prompts[type], 
+        contextToUse, // Pass summary if available
         (streamText) => {
           setter(prev => ({ ...prev, content: streamText }));
         }
@@ -118,6 +152,14 @@ const App: React.FC = () => {
       setter(prev => ({ ...prev, status: AnalysisStatus.SUCCESS }));
     } catch (e) {
       setter(prev => ({ ...prev, status: AnalysisStatus.ERROR, error: 'Failed to analyze' }));
+    }
+  };
+
+  const handleOpenKeySettings = async () => {
+    if (window.aistudio && window.aistudio.openSelectKey) {
+      await window.aistudio.openSelectKey();
+    } else {
+      alert("当前环境不支持手动设置 API Key，请检查配置。");
     }
   };
 
@@ -136,6 +178,15 @@ const App: React.FC = () => {
             </div>
           </div>
           <div className="flex items-center space-x-4">
+            <button
+              onClick={handleOpenKeySettings}
+              className="flex items-center space-x-2 text-slate-500 hover:text-blue-600 hover:bg-slate-50 px-3 py-2 rounded-lg transition-colors text-xs font-medium border border-slate-200"
+              title="设置 Gemini API Key"
+            >
+              <Key size={14} />
+              <span className="hidden sm:inline">API Key</span>
+            </button>
+
              {fileData && (
                <div className="hidden md:flex items-center px-3 py-1 bg-slate-100 rounded-full border border-slate-200 text-xs text-slate-600">
                  <FileText size={12} className="mr-2" />
@@ -201,8 +252,21 @@ const App: React.FC = () => {
               </button>
             </div>
 
+            {/* PRE-PROCESS / SUMMARY AGENT */}
+            <PreProcessSection 
+               status={summaryState.status}
+               content={summaryState.content}
+               onAnalyze={() => runAnalysis('summary', setSummaryState)}
+               promptConfig={prompts.summary}
+               onUpdatePrompt={(cfg) => updatePrompt('summary', cfg)}
+               templates={getTemplates('summary')}
+               onSaveTemplate={(name, config) => handleSaveTemplate('summary', name, config)}
+               onUpdateTemplate={handleUpdateTemplate}
+               onDeleteTemplate={handleDeleteTemplate}
+            />
+
             {/* Analysis Grid */}
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-[800px]">
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               {/* Step 1: Outline */}
               <ResultSection 
                 title="1. 大纲提取"
@@ -238,7 +302,7 @@ const App: React.FC = () => {
               {/* Step 3: Settings */}
               <ResultSection 
                 title="3. 设定拆解"
-                description="世界观、人物与力量体系"
+                description="世界观、体系与专有名词"
                 status={settingsState.status}
                 content={settingsState.content}
                 onAnalyze={() => runAnalysis('settings', setSettingsState)}
@@ -247,6 +311,54 @@ const App: React.FC = () => {
                 onUpdatePrompt={(cfg) => updatePrompt('settings', cfg)}
                 templates={getTemplates('settings')}
                 onSaveTemplate={(name, config) => handleSaveTemplate('settings', name, config)}
+                onUpdateTemplate={handleUpdateTemplate}
+                onDeleteTemplate={handleDeleteTemplate}
+              />
+
+              {/* Step 4: Relationships */}
+              <ResultSection 
+                title="4. 人物关系"
+                description="角色互动网与情感走向"
+                status={relationshipsState.status}
+                content={relationshipsState.content}
+                onAnalyze={() => runAnalysis('relationships', setRelationshipsState)}
+                icon={<Users size={20} />}
+                promptConfig={prompts.relationships}
+                onUpdatePrompt={(cfg) => updatePrompt('relationships', cfg)}
+                templates={getTemplates('relationships')}
+                onSaveTemplate={(name, config) => handleSaveTemplate('relationships', name, config)}
+                onUpdateTemplate={handleUpdateTemplate}
+                onDeleteTemplate={handleDeleteTemplate}
+              />
+
+              {/* Step 5: Theme */}
+              <ResultSection 
+                title="5. 主题分析"
+                description="母题、意象与核心寓意"
+                status={themeState.status}
+                content={themeState.content}
+                onAnalyze={() => runAnalysis('theme', setThemeState)}
+                icon={<Lightbulb size={20} />}
+                promptConfig={prompts.theme}
+                onUpdatePrompt={(cfg) => updatePrompt('theme', cfg)}
+                templates={getTemplates('theme')}
+                onSaveTemplate={(name, config) => handleSaveTemplate('theme', name, config)}
+                onUpdateTemplate={handleUpdateTemplate}
+                onDeleteTemplate={handleDeleteTemplate}
+              />
+
+              {/* Step 6: Plot Holes */}
+              <ResultSection 
+                title="6. 逻辑质检"
+                description="吃书检测与Bug排查"
+                status={plotholesState.status}
+                content={plotholesState.content}
+                onAnalyze={() => runAnalysis('plotholes', setPlotholesState)}
+                icon={<AlertOctagon size={20} />}
+                promptConfig={prompts.plotholes}
+                onUpdatePrompt={(cfg) => updatePrompt('plotholes', cfg)}
+                templates={getTemplates('plotholes')}
+                onSaveTemplate={(name, config) => handleSaveTemplate('plotholes', name, config)}
                 onUpdateTemplate={handleUpdateTemplate}
                 onDeleteTemplate={handleDeleteTemplate}
               />

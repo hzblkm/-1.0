@@ -6,7 +6,7 @@ export enum AnalysisStatus {
   ERROR = 'ERROR',
 }
 
-export type AnalysisType = 'outline' | 'style' | 'settings';
+export type AnalysisType = 'summary' | 'outline' | 'style' | 'settings' | 'relationships' | 'theme' | 'plotholes';
 
 export interface AnalysisResult {
   type: AnalysisType;
@@ -21,6 +21,11 @@ export interface FileData {
   size: number;
 }
 
+export interface ProcessedContext {
+  summary: string;
+  tokenUsageEstimate: number; // Rough estimate saved
+}
+
 export interface PromptConfig {
   system: string;
   user: string;
@@ -32,4 +37,11 @@ export interface PromptTemplate {
   type: AnalysisType;
   config: PromptConfig;
   isBuiltIn?: boolean;
+}
+
+declare global {
+  interface AIStudio {
+    hasSelectedApiKey: () => Promise<boolean>;
+    openSelectKey: () => Promise<void>;
+  }
 }
