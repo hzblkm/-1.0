@@ -14,20 +14,24 @@ const MIN_CHUNK_SIZE = 10000;
 export const DEFAULT_PROMPTS: Record<AnalysisType, PromptConfig> = {
   summary: {
     system: `你是一位拥有过目不忘能力的速读情报官。你的任务是负责“把书读薄”。
+**核心原则：严禁编造。必须完全基于提供的【待分析文本】进行提取。如果文本中没有的内容，绝对不要写。**
+
 请清洗掉原文中的环境描写、无关对话、水字数的重复内容，只保留核心剧情骨干、关键人物出场和重要设定。
 目标：将文本压缩至原来的 10%-20%，但保留 95% 的关键信息量。供后续分析师使用。`,
     user: `请对这段文本进行高保真压缩（情报清洗）。
 
 **要求**：
-1. **按时间顺序**记述发生了什么，不要写成读后感。
-2. **保留关键名次**：人名、地名、功法名不要省略。
-3. **去除修饰**：删掉形容词、心理描写，只留动作和事件。
-4. **格式**：使用紧凑的段落，不要分太细的点。
+1. **严格基于原文**：不要引入任何外部知识或网络小说套路，只概括这一段文本里发生的事。
+2. **按时间顺序**：记述发生了什么，不要写成读后感。
+3. **保留关键名次**：人名、地名、功法名不要省略。
+4. **去除修饰**：删掉形容词、心理描写，只留动作和事件。
+5. **格式**：使用紧凑的段落，不要分太细的点。
 
 （请开始压缩...）`
   },
   outline: {
     system: `你是一位专业的网文主编和剧情架构师。你的任务是分析小说文本，提取极具深度的结构化大纲。
+**核心原则：严禁编造。只分析提供的文本内容。**
 请忽略排版干扰。重点关注：故事推进、冲突升级、高潮节点。`,
     user: `请分析这段小说文本（或剧情摘要）。
 
@@ -54,6 +58,7 @@ export const DEFAULT_PROMPTS: Record<AnalysisType, PromptConfig> = {
   },
   settings: {
     system: `你是一位奇幻/科幻设定集编纂者。你的任务是挖掘文本中隐含的世界观设定。
+**核心原则：严禁编造。只提取文本中明确提到的设定。**
 关注：地图地理、力量/修炼体系、势力架构、专有名词。`,
     user: `请提取这段文本中出现的所有新设定。
 
@@ -66,6 +71,7 @@ export const DEFAULT_PROMPTS: Record<AnalysisType, PromptConfig> = {
   },
   relationships: {
     system: `你是一位资深的人物心理分析师。你的任务是梳理小说中错综复杂的人物关系网。
+**核心原则：严禁编造。只分析文本中实际互动的角色。**
 关注：角色间的互动、情感变化、阵营归属、隐藏的羁绊。`,
     user: `请分析这段文本中出现的人物及其互动关系。
 
@@ -242,16 +248,22 @@ const callGemini = async (
   userPrompt: string,
   onStream?: (text: string) => void
 ): Promise<string> => {
+  // Create a new instance for every call to ensure the latest API Key is used
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   
+  // Combine user prompt and text into ONE single text part to avoid context loss.
+  // We use strict delimiters to help the model distinguish instructions from content.
+  const combinedUserMessage = `${userPrompt}\n\n========== 待分析文本开始 ==========\n\n${text}\n\n========== 待分析文本结束 ==========\n\n请严格基于上述【待分析文本】进行回答，不要编造。`;
+
+  console.log(`Calling Gemini. Prompt Length: ${userPrompt.length}, Text Length: ${text.length}, Total: ${combinedUserMessage.length}`);
+
   const responseStream = await ai.models.generateContentStream({
     model: MODEL_NAME,
     contents: [
       {
         role: 'user',
         parts: [
-          { text: userPrompt },
-          { text: `\n\n--- 待分析文本 ---\n\n${text}` }
+          { text: combinedUserMessage }
         ]
       }
     ],
@@ -298,6 +310,18 @@ export const analyzeNovelText = async (
         onStream(accumulatedResult);
       }
     };
+
+    // --- INPUT VALIDATION & DEBUG PREVIEW ---
+    // If using raw text (not context), validate it
+    if (!processedContext && (!text || text.trim().length === 0)) {
+        throw new Error("文件内容为空或无法读取。请检查文件是否为支持的格式 (TXT/MD)。");
+    }
+
+    if (!processedContext) {
+      // Print the first 50 characters to the stream so the user can verify if it's garbled
+      const preview = text.slice(0, 50).replace(/\n/g, ' ');
+      handleStream(`*系统诊断: 已读取文本 ${text.length} 字符。前 50 字预览:「${preview} ...」*\n*如果上方预览显示乱码，请检查文件编码。*\n\n---\n\n`);
+    }
 
     // STRATEGY 0: Use Processed Context (If available and applicable)
     // Style analysis MUST use raw text to detect wording nuances.
