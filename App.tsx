@@ -4,8 +4,8 @@ import { BookOpen, Feather, Map, FileText, Trash2, Cpu, Key, Users, Lightbulb, A
 import FileUpload from './components/FileUpload';
 import ResultSection from './components/ResultSection';
 import PreProcessSection from './components/PreProcessSection';
-import { AnalysisStatus, AnalysisResult, FileData, AnalysisType, PromptConfig, PromptTemplate } from './types';
-import { analyzeNovelText, DEFAULT_PROMPTS } from './services/geminiService';
+import { AnalysisStatus, AnalysisResult, FileData, AnalysisType, PromptConfig, PromptTemplate, ChunkData } from './types';
+import { analyzeNovelText, createSmartChunks, summarizeSingleChunk, DEFAULT_PROMPTS } from './services/geminiService';
 
 const generateId = () => Math.random().toString(36).substr(2, 9);
 
@@ -13,9 +13,13 @@ const App: React.FC = () => {
   const [fileData, setFileData] = useState<FileData | null>(null);
   
   // State for the "Reader Agent" (Summary)
+  // We use this to track the overall status of the summary process
   const [summaryState, setSummaryState] = useState<AnalysisResult>({
     type: 'summary', content: '', status: AnalysisStatus.IDLE
   });
+  
+  // State for split chunks
+  const [chunks, setChunks] = useState<ChunkData[]>([]);
 
   // States for Analysis Results
   const [outlineState, setOutlineState] = useState<AnalysisResult>({
@@ -101,6 +105,7 @@ const App: React.FC = () => {
   const handleFileLoaded = (data: FileData) => {
     setFileData(data);
     // Reset all states
+    setChunks([]);
     setSummaryState({ type: 'summary', content: '', status: AnalysisStatus.IDLE });
     setOutlineState({ type: 'outline', content: '', status: AnalysisStatus.IDLE });
     setStyleState({ type: 'style', content: '', status: AnalysisStatus.IDLE });
@@ -121,6 +126,110 @@ const App: React.FC = () => {
     }));
   };
 
+  // --- Step 1: Split Logic ---
+  const handleSplitText = () => {
+    if (!fileData) return;
+    setSummaryState(prev => ({...prev, status: AnalysisStatus.LOADING }));
+    
+    try {
+      const splitChunks = createSmartChunks(fileData.content);
+      const chunkDataObjects: ChunkData[] = splitChunks.map((text, index) => ({
+        id: index,
+        originalText: text,
+        summary: '',
+        status: AnalysisStatus.IDLE
+      }));
+      setChunks(chunkDataObjects);
+      // We don't mark summaryState as SUCCESS yet, as actual reading hasn't happened.
+      // But we can set it back to IDLE or a new status if we had one.
+      // For UI simplicity, we'll keep it IDLE but checking `chunks.length > 0` drives the UI.
+      setSummaryState(prev => ({...prev, status: AnalysisStatus.IDLE })); 
+    } catch (e) {
+      console.error(e);
+      setSummaryState(prev => ({...prev, status: AnalysisStatus.ERROR, error: 'Split failed'}));
+    }
+  };
+
+  // --- Step 2: Summarize Specific Chunk ---
+  const handleSummarizeChunk = async (chunkIndex: number) => {
+    if (!chunks[chunkIndex]) return;
+
+    // Update status to LOADING
+    setChunks(prev => prev.map((c, i) => 
+      i === chunkIndex ? { ...c, status: AnalysisStatus.LOADING, summary: '' } : c
+    ));
+
+    try {
+      await summarizeSingleChunk(
+        chunks[chunkIndex].originalText,
+        prompts.summary,
+        chunkIndex,
+        chunks.length,
+        (text) => {
+          // Stream update
+          setChunks(prev => prev.map((c, i) => 
+            i === chunkIndex ? { ...c, summary: text } : c
+          ));
+        }
+      );
+      
+      // Update status to SUCCESS
+      setChunks(prev => prev.map((c, i) => 
+        i === chunkIndex ? { ...c, status: AnalysisStatus.SUCCESS } : c
+      ));
+
+      // Update main summary state content by concatenating all valid summaries
+      // This ensures downstream agents can use what we have so far
+      updateMainSummaryContent();
+
+    } catch (e) {
+      setChunks(prev => prev.map((c, i) => 
+        i === chunkIndex ? { ...c, status: AnalysisStatus.ERROR } : c
+      ));
+    }
+  };
+
+  const updateMainSummaryContent = () => {
+     setSummaryState(prev => {
+       // Re-calculate total content from all chunks
+       // Note: This relies on state closure, might lag one render cycle if called directly in async.
+       // Better to rely on the effect or just use current chunks in the next render.
+       // However, to keep it simple, we'll assume the user might click "Summarize All" or we manually aggregate.
+       // Let's just update it here based on functional state update if possible, 
+       // but chunks is complex.
+       // We'll trust the user to refresh or we can add a useEffect.
+       // Actually, let's just update it whenever a chunk finishes.
+       return prev; 
+     });
+  };
+  
+  // Sync main summary content whenever chunks change (status success)
+  React.useEffect(() => {
+    const validSummaries = chunks
+      .filter(c => c.status === AnalysisStatus.SUCCESS)
+      .map((c, i) => `### 第 ${i + 1} 部分摘要\n\n${c.summary}`)
+      .join('\n\n---\n\n');
+      
+    if (validSummaries) {
+      setSummaryState(prev => ({
+        ...prev,
+        content: validSummaries,
+        status: chunks.every(c => c.status === AnalysisStatus.SUCCESS) ? AnalysisStatus.SUCCESS : prev.status
+      }));
+    }
+  }, [chunks]);
+
+
+  // --- Helper: Summarize All ---
+  const handleSummarizeAll = async () => {
+    // Sequentially processing to avoid hitting rate limits too hard if parallel
+    for (let i = 0; i < chunks.length; i++) {
+      if (chunks[i].status !== AnalysisStatus.SUCCESS) {
+        await handleSummarizeChunk(i);
+      }
+    }
+  };
+
   const runAnalysis = async (
     type: AnalysisType, 
     setter: React.Dispatch<React.SetStateAction<AnalysisResult>>
@@ -133,7 +242,6 @@ const App: React.FC = () => {
       // Determine if we can use the pre-processed summary
       // We use summary ONLY if it exists AND the task is not style analysis AND the task is not the summary itself
       const shouldUseSummary = 
-        summaryState.status === AnalysisStatus.SUCCESS && 
         summaryState.content.length > 0 &&
         type !== 'style' && 
         type !== 'summary';
@@ -256,7 +364,10 @@ const App: React.FC = () => {
             <PreProcessSection 
                status={summaryState.status}
                content={summaryState.content}
-               onAnalyze={() => runAnalysis('summary', setSummaryState)}
+               chunks={chunks}
+               onSplit={handleSplitText}
+               onSummarizeChunk={handleSummarizeChunk}
+               onSummarizeAll={handleSummarizeAll}
                promptConfig={prompts.summary}
                onUpdatePrompt={(cfg) => updatePrompt('summary', cfg)}
                templates={getTemplates('summary')}

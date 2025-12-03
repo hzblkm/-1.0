@@ -1,13 +1,15 @@
 
 import React, { useState } from 'react';
-import { AnalysisStatus, PromptConfig, PromptTemplate } from '../types';
-import LoadingSpinner from './LoadingSpinner';
-import { Zap, CheckCircle2, FileSearch, ChevronDown, ChevronUp, AlertCircle, Settings, X, Save, FileText, Trash2, CopyPlus } from 'lucide-react';
+import { AnalysisStatus, PromptConfig, PromptTemplate, ChunkData } from '../types';
+import { Zap, CheckCircle2, FileSearch, ChevronDown, ChevronUp, Settings, X, Save, FileText, Trash2, CopyPlus, Download, Scissors, Play, RotateCw, Eye, EyeOff } from 'lucide-react';
 
 interface PreProcessSectionProps {
   status: AnalysisStatus;
-  content: string;
-  onAnalyze: () => void;
+  content: string; // The aggregate content
+  chunks: ChunkData[];
+  onSplit: () => void;
+  onSummarizeChunk: (index: number) => void;
+  onSummarizeAll: () => void;
   promptConfig: PromptConfig;
   onUpdatePrompt: (newConfig: PromptConfig) => void;
   templates: PromptTemplate[];
@@ -18,8 +20,11 @@ interface PreProcessSectionProps {
 
 const PreProcessSection: React.FC<PreProcessSectionProps> = ({ 
   status, 
-  content, 
-  onAnalyze,
+  content,
+  chunks,
+  onSplit,
+  onSummarizeChunk,
+  onSummarizeAll,
   promptConfig,
   onUpdatePrompt,
   templates,
@@ -29,6 +34,8 @@ const PreProcessSection: React.FC<PreProcessSectionProps> = ({
 }) => {
   const [isExpanded, setIsExpanded] = useState(true);
   const [isEditing, setIsEditing] = useState(false);
+  const [activeTab, setActiveTab] = useState<'chunks' | 'aggregate'>('chunks');
+  const [expandedChunks, setExpandedChunks] = useState<Record<number, boolean>>({});
   
   // Editing states
   const [tempSystemPrompt, setTempSystemPrompt] = useState(promptConfig.system);
@@ -38,9 +45,22 @@ const PreProcessSection: React.FC<PreProcessSectionProps> = ({
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>('');
   const [templateNameInput, setTemplateNameInput] = useState('');
   
+  const hasChunks = chunks.length > 0;
   const isFinished = status === AnalysisStatus.SUCCESS;
-  const isIdle = status === AnalysisStatus.IDLE;
-  const isLoading = status === AnalysisStatus.LOADING;
+
+  const handleDownload = () => {
+    if (!content) return;
+    
+    const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `AI_速读情报_全书精华.md`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
 
   const handleSaveSettings = () => {
     onUpdatePrompt({
@@ -48,7 +68,6 @@ const PreProcessSection: React.FC<PreProcessSectionProps> = ({
       user: tempUserPrompt
     });
     setIsEditing(false);
-    // If settings were changed, we probably want to see the panel to re-run
     setIsExpanded(true); 
   };
 
@@ -64,9 +83,16 @@ const PreProcessSection: React.FC<PreProcessSectionProps> = ({
       setTempUserPrompt(promptConfig.user);
       setSelectedTemplateId('');
       setTemplateNameInput('');
-      setIsExpanded(true); // Ensure panel is open when editing
+      setIsExpanded(true); 
     }
     setIsEditing(!isEditing);
+  };
+
+  const toggleChunkPreview = (index: number) => {
+    setExpandedChunks(prev => ({
+      ...prev,
+      [index]: !prev[index]
+    }));
   };
 
   const handleTemplateChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
@@ -118,7 +144,7 @@ const PreProcessSection: React.FC<PreProcessSectionProps> = ({
 
   return (
     <div className={`rounded-xl border shadow-sm transition-all duration-300 overflow-hidden mb-8 ${
-      isFinished 
+      hasChunks || isFinished 
         ? 'bg-gradient-to-br from-indigo-50 to-blue-50 border-indigo-200' 
         : 'bg-white border-slate-200'
     }`}>
@@ -127,8 +153,8 @@ const PreProcessSection: React.FC<PreProcessSectionProps> = ({
       <div className="p-6">
         <div className="flex justify-between items-start">
           <div className="flex items-start space-x-4">
-            <div className={`p-3 rounded-xl ${isFinished ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-500'}`}>
-              <Zap size={24} fill={isFinished ? "currentColor" : "none"} />
+            <div className={`p-3 rounded-xl ${hasChunks ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-500'}`}>
+              <Zap size={24} fill={hasChunks ? "currentColor" : "none"} />
             </div>
             <div>
               <h2 className="text-xl font-bold text-slate-800 flex items-center">
@@ -136,12 +162,9 @@ const PreProcessSection: React.FC<PreProcessSectionProps> = ({
                 {isFinished && <CheckCircle2 size={20} className="text-emerald-500 ml-2" />}
               </h2>
               <p className="text-slate-500 mt-1 max-w-2xl">
-                这是分析链路的“眼睛”。它将把百万字的长文“读薄”为高浓度的剧情情报。
-                <br/>
-                <span className="text-xs font-medium text-amber-600 bg-amber-50 px-2 py-0.5 rounded mt-1 inline-block">
-                  强烈推荐优先运行
-                </span>
-                <span className="text-xs text-slate-400 ml-2">后续分析使用此情报可节省 90% 的 Token，速度更快。</span>
+                这是分析链路的“眼睛”。分为两步：<br/>
+                1. 智能拆分：将长文按语义切分为若干部分。<br/>
+                2. 极速阅读：逐个或批量生成高浓度的剧情情报。
               </p>
             </div>
           </div>
@@ -159,30 +182,46 @@ const PreProcessSection: React.FC<PreProcessSectionProps> = ({
                 </button>
               )}
 
-              {isIdle && !isEditing && (
+              {/* Download Button */}
+              {isFinished && !isEditing && (
+                <button
+                  onClick={handleDownload}
+                  className="p-2 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-colors"
+                  title="下载情报 (Markdown)"
+                >
+                  <Download size={18} />
+                </button>
+              )}
+
+              {/* STEP 1: SPLIT */}
+              {!hasChunks && !isEditing && (
                 <button 
-                  onClick={onAnalyze}
+                  onClick={onSplit}
                   className="flex items-center space-x-2 px-6 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg shadow-md transition-all transform hover:-translate-y-0.5"
                 >
+                  <Scissors size={18} />
+                  <span>第一步：智能拆分</span>
+                </button>
+              )}
+
+               {/* STEP 2: SUMMARY ALL */}
+               {hasChunks && !isEditing && (
+                <button 
+                  onClick={onSummarizeAll}
+                  className="flex items-center space-x-2 px-6 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-lg shadow-md transition-all transform hover:-translate-y-0.5"
+                >
                   <FileSearch size={18} />
-                  <span>开始全书速读</span>
+                  <span>第二步：批量速读 ({chunks.length} 部分)</span>
                 </button>
               )}
             </div>
             
-            {isLoading && !isEditing && (
-               <div className="flex items-center space-x-3 px-6 py-2 bg-white border border-slate-200 text-indigo-600 font-medium rounded-lg shadow-sm">
-                 <div className="animate-spin h-5 w-5 border-2 border-indigo-600 border-t-transparent rounded-full"></div>
-                 <span>正在极速阅读中...</span>
-               </div>
-            )}
-
-            {isFinished && !isEditing && (
+            {hasChunks && !isEditing && (
                <button 
                  onClick={() => setIsExpanded(!isExpanded)}
                  className="flex items-center space-x-2 text-slate-500 hover:text-indigo-600 text-sm transition-colors"
                >
-                 <span>{isExpanded ? '收起详情' : '查看情报内容'}</span>
+                 <span>{isExpanded ? '收起详情' : '展开详情'}</span>
                  {isExpanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
                </button>
             )}
@@ -212,7 +251,7 @@ const PreProcessSection: React.FC<PreProcessSectionProps> = ({
                  </button>
                </div>
            </div>
-
+           
            {/* Template Controls */}
            <div className="bg-white p-3 rounded-lg border border-slate-200 mb-4">
               <div className="flex items-center justify-between mb-2">
@@ -263,7 +302,6 @@ const PreProcessSection: React.FC<PreProcessSectionProps> = ({
               </div>
            </div>
 
-           {/* Save Template Actions */}
            <div className="mt-4 pt-3 border-t border-slate-200">
              <div className="flex items-center space-x-2">
                 <input 
@@ -294,26 +332,104 @@ const PreProcessSection: React.FC<PreProcessSectionProps> = ({
         </div>
       )}
 
-      {/* Output Content Area */}
-      {!isEditing && isExpanded && (content || isLoading) && (
-        <div className="border-t border-slate-200/60 bg-white/50 p-6 animate-in fade-in slide-in-from-top-2">
-           {isLoading && !content && (
-              <div className="flex flex-col items-center justify-center py-8 text-slate-400">
-                 <p className="animate-pulse">正在清洗无效数据、提取核心剧情流...</p>
-              </div>
-           )}
+      {/* Main Content Area */}
+      {!isEditing && isExpanded && hasChunks && (
+        <div className="border-t border-slate-200/60 bg-white/50 p-0 animate-in fade-in slide-in-from-top-2">
            
-           {content && (
-             <div className="prose prose-slate max-w-none prose-sm">
-                <div className="flex items-center space-x-2 text-xs text-emerald-600 bg-emerald-50 px-3 py-2 rounded-lg mb-4 border border-emerald-100 w-fit">
-                   <CheckCircle2 size={14} />
-                   <span>全书情报已生成。下方的【大纲】、【设定】、【关系】等模块将自动基于此情报进行分析，大幅节省 Token。</span>
-                </div>
-                <div className="max-h-[300px] overflow-y-auto pr-2 whitespace-pre-wrap leading-relaxed bg-white p-4 rounded-lg border border-slate-100 shadow-inner">
-                  {content}
-                </div>
+           {/* Tabs */}
+           <div className="flex border-b border-slate-200 bg-slate-50 px-6 pt-2">
+              <button 
+                onClick={() => setActiveTab('chunks')}
+                className={`px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${activeTab === 'chunks' ? 'bg-white text-indigo-600 border-t border-x border-slate-200 -mb-px' : 'text-slate-500 hover:text-slate-700'}`}
+              >
+                分段管理 ({chunks.length})
+              </button>
+              <button 
+                onClick={() => setActiveTab('aggregate')}
+                className={`px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${activeTab === 'aggregate' ? 'bg-white text-indigo-600 border-t border-x border-slate-200 -mb-px' : 'text-slate-500 hover:text-slate-700'}`}
+              >
+                全书情报总览
+              </button>
+           </div>
+
+           {/* Tab Content: CHUNKS LIST */}
+           {activeTab === 'chunks' && (
+             <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-4 max-h-[500px] overflow-y-auto">
+                {chunks.map((chunk, index) => (
+                  <div key={chunk.id} className="bg-white border border-slate-200 rounded-lg shadow-sm hover:shadow-md transition-shadow overflow-hidden flex flex-col">
+                     <div className="px-4 py-3 bg-slate-50 border-b border-slate-100 flex justify-between items-center">
+                        <span className="text-xs font-bold text-slate-700">Part {index + 1}</span>
+                        <div className="flex items-center space-x-2">
+                           <button 
+                              onClick={() => toggleChunkPreview(index)}
+                              className="text-slate-400 hover:text-indigo-600 transition-colors"
+                              title={expandedChunks[index] ? "隐藏原文" : "预览原文"}
+                           >
+                              {expandedChunks[index] ? <EyeOff size={14} /> : <Eye size={14} />}
+                           </button>
+                           <span className="text-[10px] text-slate-400 font-mono">{(chunk.originalText.length / 1000).toFixed(1)}k chars</span>
+                        </div>
+                     </div>
+                     
+                     <div className="p-4 flex-grow h-64 overflow-y-auto relative custom-scrollbar">
+                        {expandedChunks[index] ? (
+                           <div className="text-slate-500 font-mono text-xs whitespace-pre-wrap bg-slate-50 p-2 rounded border border-slate-200 h-full overflow-y-auto">
+                              <div className="text-[10px] text-indigo-500 mb-1 font-bold sticky top-0 bg-slate-50 pb-1 border-b border-slate-100">--- 原文预览 (前1000字) ---</div>
+                              {chunk.originalText.slice(0, 1000)}
+                              {chunk.originalText.length > 1000 && '...'}
+                           </div>
+                        ) : chunk.summary ? (
+                          <div className="prose prose-xs max-w-none text-slate-800 whitespace-pre-wrap leading-relaxed">
+                             <div className="font-bold text-emerald-600 mb-2 flex items-center bg-emerald-50 w-fit px-2 py-1 rounded"><CheckCircle2 size={12} className="mr-1"/> 已提炼:</div>
+                             {chunk.summary}
+                          </div>
+                        ) : (
+                          <div className="text-slate-400 italic text-xs h-full flex items-center justify-center">
+                             <p>等待分析...</p>
+                          </div>
+                        )}
+                     </div>
+
+                     <div className="p-3 border-t border-slate-100 bg-slate-50/50 flex justify-end">
+                        {chunk.status === AnalysisStatus.LOADING ? (
+                           <span className="text-xs text-indigo-600 flex items-center px-3 py-1.5"><div className="animate-spin h-3 w-3 border-2 border-indigo-600 border-t-transparent rounded-full mr-2"></div> 读取中...</span>
+                        ) : chunk.status === AnalysisStatus.SUCCESS ? (
+                           <button onClick={() => onSummarizeChunk(index)} className="text-xs flex items-center text-slate-500 hover:text-indigo-600 px-3 py-1.5 transition-colors">
+                              <RotateCw size={12} className="mr-1"/> 重新速读
+                           </button>
+                        ) : (
+                           <button onClick={() => onSummarizeChunk(index)} className="text-xs flex items-center bg-white border border-slate-300 hover:border-indigo-500 hover:text-indigo-600 px-3 py-1.5 rounded shadow-sm transition-all">
+                              <Play size={12} className="mr-1"/> 开始速读
+                           </button>
+                        )}
+                     </div>
+                  </div>
+                ))}
              </div>
            )}
+
+           {/* Tab Content: AGGREGATE */}
+           {activeTab === 'aggregate' && (
+              <div className="p-6">
+                 {content ? (
+                   <div className="prose prose-slate max-w-none prose-sm">
+                      <div className="flex items-center space-x-2 text-xs text-emerald-600 bg-emerald-50 px-3 py-2 rounded-lg mb-4 border border-emerald-100 w-fit">
+                         <CheckCircle2 size={14} />
+                         <span>以下内容为所有分段情报的汇总。后续模块将基于此内容进行分析。</span>
+                      </div>
+                      <div className="max-h-[500px] overflow-y-auto pr-2 whitespace-pre-wrap leading-relaxed bg-white p-4 rounded-lg border border-slate-100 shadow-inner">
+                        {content}
+                      </div>
+                   </div>
+                 ) : (
+                   <div className="flex flex-col items-center justify-center py-12 text-slate-400">
+                      <FileText size={32} className="mb-2 opacity-50"/>
+                      <p>暂无汇总情报。请先在“分段管理”中对各个片段进行速读。</p>
+                   </div>
+                 )}
+              </div>
+           )}
+
         </div>
       )}
     </div>

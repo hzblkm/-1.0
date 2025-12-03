@@ -15,6 +15,13 @@ export interface AnalysisResult {
   error?: string;
 }
 
+export interface ChunkData {
+  id: number;
+  originalText: string;
+  summary: string;
+  status: AnalysisStatus;
+}
+
 export interface FileData {
   name: string;
   content: string;

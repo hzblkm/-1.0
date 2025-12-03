@@ -5,29 +5,30 @@ import { AnalysisType, PromptConfig } from "../types";
 const MODEL_NAME = "gemini-3-pro-preview";
 
 // Token/Char Limits
-// Aim for ~300k chars per chunk to be safe within 1M token limit even with CJK density.
-const TARGET_CHUNK_SIZE = 300000; 
-const MIN_CHUNK_SIZE = 10000; 
+// Reduced to 50k chars for better stability and instruction following.
+// 300k was causing hallucinations and timeouts.
+const TARGET_CHUNK_SIZE = 50000; 
+const MIN_CHUNK_SIZE = 5000; 
 
 // --- Default Prompts Exported for UI ---
 
 export const DEFAULT_PROMPTS: Record<AnalysisType, PromptConfig> = {
   summary: {
-    system: `你是一位拥有过目不忘能力的速读情报官。你的任务是负责“把书读薄”。
-**核心原则：严禁编造。必须完全基于提供的【待分析文本】进行提取。如果文本中没有的内容，绝对不要写。**
+    system: `你是一位经验丰富的网文主编。你的任务是通读小说原稿，整理出一份**详尽的剧情梗概**。
+**核心原则**：
+1. **不要过度压缩**：5万字的文本包含大量细节，请不要只写一两句话。我需要知道具体发生了什么。
+2. **保留事件逻辑**：起因、经过、结果要完整。
+3. **关键信息不遗漏**：新出场的人物姓名、获得的物品/功法、地名、等级变化等必须记录。
+4. **客观陈述**：只陈述剧情，不要发表评论。`,
+    user: `请阅读这段小说文本（约5万字符），并生成一份**详细的事件流水账**。
 
-请清洗掉原文中的环境描写、无关对话、水字数的重复内容，只保留核心剧情骨干、关键人物出场和重要设定。
-目标：将文本压缩至原来的 10%-20%，但保留 95% 的关键信息量。供后续分析师使用。`,
-    user: `请对这段文本进行高保真压缩（情报清洗）。
+**输出要求**：
+1. **分场景/分事件叙述**：如果这段文本跨越了多个场景（如：先在家里修炼，然后去拍卖行，最后在野外打架），请分开段落描述。
+2. **包含对话重点**：如果有关键的剧情对话，请概括对话的核心内容（如“A威胁B交出宝物，B拒绝并提出决斗”）。
+3. **战斗/冲突细节**：如果是战斗情节，简述双方使用的招式和胜负过程。
+4. **长度适中**：请输出约 500-1000 字的详细摘要，确保我看摘要就能完全明白这段写了什么。
 
-**要求**：
-1. **严格基于原文**：不要引入任何外部知识或网络小说套路，只概括这一段文本里发生的事。
-2. **按时间顺序**：记述发生了什么，不要写成读后感。
-3. **保留关键名次**：人名、地名、功法名不要省略。
-4. **去除修饰**：删掉形容词、心理描写，只留动作和事件。
-5. **格式**：使用紧凑的段落，不要分太细的点。
-
-（请开始压缩...）`
+（请开始分析...）`
   },
   outline: {
     system: `你是一位专业的网文主编和剧情架构师。你的任务是分析小说文本，提取极具深度的结构化大纲。
@@ -109,8 +110,9 @@ export const DEFAULT_PROMPTS: Record<AnalysisType, PromptConfig> = {
 
 /**
  * Split text intelligently preserving paragraph/sentence boundaries
+ * Exported for UI use
  */
-const createSmartChunks = (text: string): string[] => {
+export const createSmartChunks = (text: string): string[] => {
   const chunks: string[] = [];
   let currentPos = 0;
 
@@ -127,8 +129,8 @@ const createSmartChunks = (text: string): string[] => {
     // Priority: \n\n (Paragraph) > \n (Line) > 。/./!/? (Sentence)
     let splitPos = -1;
     
-    // Search window: look back up to 20k chars from the hard cut limit
-    const searchStart = Math.max(currentPos + MIN_CHUNK_SIZE, endPos - 20000);
+    // Search window: look back up to 5k chars from the hard cut limit
+    const searchStart = Math.max(currentPos + MIN_CHUNK_SIZE, endPos - 5000);
     const searchEnd = endPos;
     const textWindow = text.slice(searchStart, searchEnd);
 
@@ -187,7 +189,7 @@ const createSmartChunks = (text: string): string[] => {
 const sampleTextForStyle = (text: string): string => {
   if (text.length <= TARGET_CHUNK_SIZE) return text;
 
-  const SAMPLE_PART_SIZE = 100000; // 100k chars per part
+  const SAMPLE_PART_SIZE = 50000; // 50k chars per part for style
   
   // Helper to find a safe boundary forward
   const findSafeEnd = (start: number, length: number) => {
@@ -246,7 +248,8 @@ const callGemini = async (
   text: string, 
   systemInstruction: string,
   userPrompt: string,
-  onStream?: (text: string) => void
+  onStream?: (text: string) => void,
+  options?: { useThinking?: boolean }
 ): Promise<string> => {
   // Create a new instance for every call to ensure the latest API Key is used
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
@@ -256,6 +259,9 @@ const callGemini = async (
   const combinedUserMessage = `${userPrompt}\n\n========== 待分析文本开始 ==========\n\n${text}\n\n========== 待分析文本结束 ==========\n\n请严格基于上述【待分析文本】进行回答，不要编造。`;
 
   console.log(`Calling Gemini. Prompt Length: ${userPrompt.length}, Text Length: ${text.length}, Total: ${combinedUserMessage.length}`);
+
+  // Disable thinking for summaries to prevent over-abstraction
+  const thinkingBudget = options?.useThinking === false ? 0 : 32768;
 
   const responseStream = await ai.models.generateContentStream({
     model: MODEL_NAME,
@@ -270,7 +276,7 @@ const callGemini = async (
     config: {
       systemInstruction: systemInstruction,
       thinkingConfig: {
-        thinkingBudget: 32768, // Max thinking budget for deep analysis
+        thinkingBudget: thinkingBudget, 
       },
     }
   });
@@ -284,6 +290,21 @@ const callGemini = async (
     }
   }
   return fullText;
+};
+
+/**
+ * Summarize a single chunk
+ */
+export const summarizeSingleChunk = async (
+  text: string,
+  promptConfig: PromptConfig,
+  chunkIndex: number,
+  totalChunks: number,
+  onStream?: (text: string) => void
+): Promise<string> => {
+  const prompt = formatUserPrompt(promptConfig.user, totalChunks > 1, chunkIndex, totalChunks);
+  // Force disable thinking for summarization to get detailed event logs
+  return await callGemini(text, promptConfig.system, prompt, onStream, { useThinking: false });
 };
 
 /**
@@ -354,7 +375,9 @@ export const analyzeNovelText = async (
     
     if (chunks.length === 1) {
       const prompt = formatUserPrompt(promptConfig.user, false);
-      await callGemini(chunks[0], promptConfig.system, prompt, (chunk) => handleStream(chunk));
+      // Disable thinking for single-chunk summary as well
+      const useThinking = type !== 'summary';
+      await callGemini(chunks[0], promptConfig.system, prompt, (chunk) => handleStream(chunk), { useThinking });
     } else {
       handleStream(`*检测到超长文本，已智能分割为 ${chunks.length} 个语义完整的片段进行深度分析...*\n\n`);
       
@@ -363,7 +386,9 @@ export const analyzeNovelText = async (
         handleStream(header);
         
         const prompt = formatUserPrompt(promptConfig.user, true, i, chunks.length);
-        await callGemini(chunks[i], promptConfig.system, prompt, (chunk) => handleStream(chunk));
+        // Disable thinking for summary chunks
+        const useThinking = type !== 'summary';
+        await callGemini(chunks[i], promptConfig.system, prompt, (chunk) => handleStream(chunk), { useThinking });
         
         handleStream(`\n\n---\n`);
       }
@@ -380,16 +405,14 @@ export const analyzeNovelText = async (
             summaryHeader = `\n\n### 🏁 核心主旨升华\n\n*正在综合分析全书的深层寓意...*\n\n`;
             summaryPrompt = "基于以上各部分的主题分析，请提炼这本书最核心的这一个‘灵魂’。作者到底想通过这个故事表达什么？是关于人性的某种洞察，还是对某种社会现象的隐喻？";
           } else if (type === 'summary') {
-            // For the Summary Agent, we don't necessarily need a meta-summary, 
-            // the concatenated parts are often good enough "Context".
-            // But we can add a quick "Story Arc" label at the end.
             summaryHeader = "";
             summaryPrompt = ""; 
           }
           
           if (summaryPrompt) {
              handleStream(summaryHeader);
-             await callGemini(accumulatedResult, "你是一位善于总结的文学主编。", summaryPrompt, (chunk) => handleStream(chunk));
+             // Enable thinking for the final meta-analysis
+             await callGemini(accumulatedResult, "你是一位善于总结的文学主编。", summaryPrompt, (chunk) => handleStream(chunk), { useThinking: true });
           }
       }
     }
